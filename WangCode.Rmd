@@ -1,0 +1,187 @@
+---
+title: "Wang_Code"
+author: "Claire Willing"
+date: "2024-11-20"
+output: html_document
+---
+Read in libraries
+```{r warning=FALSE}
+# Function to install and load packages
+install_and_load <- function(packages) {
+  for (pkg in packages) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      if (pkg == "phyloseq") {
+        if (!requireNamespace("BiocManager", quietly = TRUE)) {
+          install.packages("BiocManager")
+        }
+        BiocManager::install(pkg)
+      } else {
+        install.packages(pkg)
+      }
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+# List of required packages
+required_packages <- c(
+  "phyloseq",  # For working with sequencing data
+  "dplyr",     # For data manipulation
+  "ggplot2",   # For plotting
+  "readxl",    # For reading Excel files
+  "writexl",   # For writing Excel files
+  "tibble",    # For converting columns to row names
+  "stringr",   # For string manipulation
+  "viridis",    # For color palettes
+  "ggeffects",
+  "broom"
+)
+
+# Install and load packages
+install_and_load(required_packages)
+```
+Get working directory
+```{r}
+working_directory <- getwd()
+#unix (linux,mac)
+its_phyloseq <- paste(working_directory, "WangPhyloseqData.rds", sep="/")
+# Windows
+#its_phyloseq <- paste(working_directory, "FischerPhyloseqData.rds", sep="\")
+```
+
+Pull in the file
+```{r setup, include=FALSE}
+Data_Raw <- readRDS(its_phyloseq)
+```
+
+Rarification
+```{r message=FALSE, warning=FALSE}
+set.seed(5)
+RARE=rarefy_even_depth(Data_Raw, sample.size = 5000)
+save(RARE, file = "RARE.rda")
+load(file = "RARE.rda")
+
+outlier_samples <- c("CW2","CW18", "CW4") 
+RARE <- prune_samples(!sample_names(RARE) %in% outlier_samples, RARE)
+```
+
+Ordination (NMDS) using default of bray for distance (bray is default method for ordinate function)
+```{r message=FALSE, warning=FALSE}
+#make sure the variables are factors
+sample_data(RARE)$block <- as.factor(sample_data(RARE)$block)
+sample_data(RARE)$logdistance <- as.numeric(sample_data(RARE)$logdistance)
+
+ORDtotalvals<-ordinate(RARE, "NMDS")
+ORD<-plot_ordination(RARE, ORDtotalvals, color="logdistance",shape="block")+
+  theme_minimal()
+ORD
+
+```
+Barplots
+```{r}
+#merge by grouping
+ps_merged <- merge_samples(RARE, "distance")
+#turn into relative abundance
+ps_rel <- transform_sample_counts(ps_merged, function(x) x / sum(x))
+
+#aggregate at taxonomic level of interest (this part is slow)
+ps_taxa <- tax_glom(ps_rel, taxrank = "Phylum")
+
+#melt for data visualization
+ps_melt <- psmelt(ps_taxa)
+ps_melt$order[ps_melt$Abundance < 0.03] <- "Other"
+ps_melt <- ps_melt %>%
+  arrange(logdistance) %>%
+  mutate(Sample = factor(Sample, levels = unique(Sample)))
+
+barplot<-ggplot(ps_melt, aes(x = Sample, y = Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(x = "Distance from forest edge (m)", y = "Relative Abundance", fill = "Phylum") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  scale_fill_viridis_d(option = "plasma")
+
+barplot
+```
+
+#Question 1: What is the relationship between total nitrogen content of the substrate and the dispersal distance of Agaricales, Cantharellales, and Russulales?
+
+##Hypothesis 1: Higher amounts of nitrogen will have a positive correlation with dispersal distance. This study uses dispersal distance as a proxy for spore density; access to more nutrients will positively affect spore production/dispersal.
+
+###H1 Statistics
+```{r}
+##for simplicity, I just took the entire Class of Agaricomycetes; this included Russulales, Cantheralles, Polyporales, Hymenochaetales, and Agaricales
+
+Agaricomycetes<-subset_taxa(RARE, Class=="Agaricomycetes")
+Agaricomycetes_df <- psmelt(Agaricomycetes)
+
+# Assuming nitrogen is a column in sample data and 'dispersal_distance' is also available
+Agaricomycetes_df$TN <- sample_data(Agaricomycetes_df)$TN  
+Agaricomycetes_df$logdistance <- sample_data(Agaricomycetes_df)$logdistance  
+
+N_Dispersal_model <- lm(logdistance ~ TN, data = Agaricomycetes_df)
+
+summary(N_Dispersal_model)
+
+table_N <- tidy(N_Dispersal_model)
+View(table_N)
+```
+###H1 Plot
+```{r}
+# Generate predictions for mean relative humidity
+predictions_nitrogen <- ggpredict(N_Dispersal_model, terms = c("TN"))
+
+# Plot predictions for mean relative humidity
+plot_N_distance <- ggplot(predictions_nitrogen, aes(x = x, y = predicted)) +
+  geom_line(size = 1, color = "blue") +  # Prediction line
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), fill = "blue", alpha = 0.2) +  # Confidence intervals
+  theme_minimal() +
+  labs(
+    x = "Total Nitrogen",
+    y = "Predicted Dispersal Distance (Agaricomyetes)"
+  )
+plot_N_distance
+```
+#Question 2: Does species diversity decrease across distance?
+##Hypothesis 2: Since most fungal species are unable to distribute spores across long distances, we predict that species diversity will decrease as distance increases.
+
+###H2 Plots
+```{r}
+richness_df <- estimate_richness(RARE, measures = c("Observed", "Shannon"))
+richness_df$Sample<-rownames(richness_df)
+richness_df <- richness_df %>%
+mutate(Sample = gsub("[.-]", "-", Sample))
+
+SampleData<-as(sample_data(RARE), "data.frame")
+SampleData$Sample<-rownames(SampleData)
+
+richness_df$Observed <- as.numeric(richness_df$Observed)
+richness_df$Shannon <- as.numeric(richness_df$Shannon)
+
+
+Richnessdf<-full_join(richness_df, SampleData)
+
+richness_plot <- ggplot(Richnessdf, aes(x = logdistance, y = Shannon)) +
+geom_point(color = "darkgreen", alpha = 0.7) +
+geom_smooth(method = "lm", se = FALSE, color = "darkgray") +
+theme_minimal() +
+theme(
+panel.grid.major = element_line(color = "gray85"),
+panel.grid.minor = element_blank(),
+panel.background = element_rect(fill = "white", color = "gray90")) +
+labs(
+x = "Log of Distance (log distance)",
+y = "Shannon Diversity Index (H')")
+
+richness_plot
+```
+###H2 statistics
+```{r}
+lm_model <- lm(Shannon ~ logdistance, data = Richnessdf)
+summary(lm_model)  
+
+table <- tidy(lm_model)
+View(table)
+```
+
+View(RARE@sam_data)
